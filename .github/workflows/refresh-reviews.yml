@@ -18,8 +18,8 @@ name: Rafraîchir les avis Judge.me
 
 on:
   schedule:
-    # tous les lundis à 06:00 UTC (≈ 07:00/08:00 en France selon saison)
-    - cron: "0 6 * * 1"
+    # tous les jours à 10:00 UTC = midi en France l'été / 11h l'hiver
+    - cron: "0 10 * * *"
   workflow_dispatch: {}   # permet de lancer manuellement depuis l'onglet Actions
 
 permissions:
