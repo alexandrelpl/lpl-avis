@@ -1,0 +1,56 @@
+# ============================================================================
+#  GitHub Actions — Rafraîchissement automatique des avis Judge.me
+#  ----------------------------------------------------------------------------
+#  Emplacement dans le repo : .github/workflows/refresh-reviews.yml
+#
+#  Ce workflow :
+#    1. S'exécute selon un planning (cron) + à la demande (bouton "Run workflow")
+#    2. Lance generate-judgeme-reviews.mjs avec tes secrets GitHub
+#    3. Commite judgeme-reviews.json s'il a changé
+#
+#  Secrets à créer dans le repo (Settings > Secrets and variables > Actions) :
+#    - SHOP_DOMAIN          ex. le-petit-lunetier.myshopify.com
+#    - JUDGEME_API_TOKEN    ton Private API token Judge.me
+#  (Ces secrets sont chiffrés par GitHub et n'apparaissent JAMAIS dans le code.)
+# ============================================================================
+
+name: Rafraîchir les avis Judge.me
+
+on:
+  schedule:
+    # tous les lundis à 06:00 UTC (≈ 07:00/08:00 en France selon saison)
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}   # permet de lancer manuellement depuis l'onglet Actions
+
+permissions:
+  contents: write          # nécessaire pour committer le JSON
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Récupérer le repo
+        uses: actions/checkout@v4
+
+      - name: Installer Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Générer le JSON des avis
+        env:
+          SHOP_DOMAIN: ${{ secrets.SHOP_DOMAIN }}
+          JUDGEME_API_TOKEN: ${{ secrets.JUDGEME_API_TOKEN }}
+        run: node generate-judgeme-reviews.mjs
+
+      - name: Committer le JSON s'il a changé
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add judgeme-reviews.json
+          if git diff --staged --quiet; then
+            echo "Aucun changement d'avis — rien à committer."
+          else
+            git commit -m "chore: refresh Judge.me reviews [skip ci]"
+            git push
+          fi
