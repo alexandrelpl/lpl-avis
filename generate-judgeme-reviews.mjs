@@ -42,6 +42,12 @@ const PRODUCT_HANDLES = [
   'dolores-ecaille-solaire',
   'dolores-ecaille-lumiere-bleue',
   'annie-j-ecaille-solaire',
+  'emma-s-noir',
+  'peaches-s-noir-solaire',
+  'emily-c-gold-lumiere-bleue',
+  'montrose-noir-lumiere-bleue',
+  'alex-l-ecaille-solaire',
+  'naya-ecaille-rouge-solaire',
 ];
 
 const MIN_RATING = 3;   // notes minimales conservées (3 -> garde 3, 4 et 5 étoiles)
