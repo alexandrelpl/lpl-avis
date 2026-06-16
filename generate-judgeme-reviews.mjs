@@ -1,72 +1,42 @@
 #!/usr/bin/env node
 /**
  * ============================================================================
- * GÉNÉRATEUR DE JSON D'AVIS JUDGE.ME  (snapshot sécurisé, côté serveur)
+ * GÉNÉRATEUR DE JSON D'AVIS JUDGE.ME — MODE STORE-WIDE
  * ----------------------------------------------------------------------------
- * Ce script :
- *   1. Convertit chaque handle produit Shopify -> ID interne Judge.me
- *   2. Récupère les avis de chaque produit (par_page=100, publiés uniquement)
- *   3. Filtre sur les notes >= MIN_RATING (3 par défaut)
- *   4. Fusionne, trie, et garde les LIMIT plus récents (20 par défaut)
- *   5. Écrit "judgeme-reviews.json" et affiche le JSON à coller dans la section
+ * Récupère les avis de TOUTE la boutique (pas une sélection de produits),
+ * filtre les notes >= MIN_RATING, trie par date décroissante, garde les LIMIT
+ * plus récents, et résout le produit de chaque avis (pour le lien).
  *
- * Le Private Token RESTE sur ta machine (variable d'environnement).
- * Il n'est JAMAIS écrit dans le JSON ni exposé au navigateur.
+ * Le Private Token RESTE sur ta machine / dans les secrets GitHub (jamais ici).
  *
  * ----------------------------------------------------------------------------
- * PRÉREQUIS : Node.js 18 ou plus récent (fetch natif).
- *
- * UTILISATION (depuis un terminal, dans le dossier du script) :
- *
+ * PRÉREQUIS : Node.js 18+ (fetch natif).
+ * UTILISATION :
  *   SHOP_DOMAIN="le-petit-lunetier.myshopify.com" \
  *   JUDGEME_API_TOKEN="ton_private_token" \
  *   node generate-judgeme-reviews.mjs
- *
- * (Sur Windows PowerShell :
- *   $env:SHOP_DOMAIN="..."; $env:JUDGEME_API_TOKEN="..."; node generate-judgeme-reviews.mjs )
  * ============================================================================
  */
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ⚙️  CONFIGURATION — À ADAPTER
-// ─────────────────────────────────────────────────────────────────────────────
-
-// La liste FIXE de produits à mettre en avant (leurs handles Shopify).
-// Le handle est la fin de l'URL : /products/CE-QUI-EST-ICI
-const PRODUCT_HANDLES = [
-  'annie-j-champagne-lumiere-bleue',
-  'annie-j-bleu-ecaille-lumiere-bleue',
-  'annie-j-ecaille-lumiere-bleue',
-  'jerry-s-ecaille-solaire',
-  'gigi-ecaille-lumiere-bleue-copy',
-  'dolores-ecaille-solaire',
-  'dolores-ecaille-lumiere-bleue',
-  'annie-j-ecaille-solaire',
-  'emma-s-noir',
-  'peaches-s-noir-solaire',
-  'emily-c-gold-lumiere-bleue',
-  'montrose-noir-lumiere-bleue',
-  'alex-l-ecaille-solaire',
-  'naya-ecaille-rouge-solaire',
-];
-
-const MIN_RATING = 3;   // notes minimales conservées (3 -> garde 3, 4 et 5 étoiles)
-const LIMIT      = 20;  // nombre d'avis final
-const SORT_BY    = 'date'; // 'date' (plus récents) ou 'rating' (mieux notés d'abord)
-
-const OUTPUT_FILE = 'judgeme-reviews.json';
+import { writeFileSync } from 'node:fs';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 🔒  IDENTIFIANTS (via variables d'environnement — ne pas écrire en dur ici)
+// ⚙️  RÉGLAGES
+// ─────────────────────────────────────────────────────────────────────────────
+const MIN_RATING   = 3;     // notes minimales conservées (3 -> 3, 4 et 5 étoiles)
+const LIMIT        = 20;    // nombre d'avis final
+const REQUIRE_TEXT = false; // true = ne garder que les avis avec un vrai commentaire écrit
+const MAX_PAGES    = 100;   // garde-fou (100 pages x 100 = 10 000 avis max balayés)
+const OUTPUT_FILE  = 'judgeme-reviews.json';
+const BASE         = 'https://api.judge.me/api/v1';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 🔒  IDENTIFIANTS (variables d'environnement)
 // ─────────────────────────────────────────────────────────────────────────────
 const SHOP_DOMAIN = process.env.SHOP_DOMAIN;
 const API_TOKEN   = process.env.JUDGEME_API_TOKEN;
 
-const BASE = 'https://api.judge.me/api/v1';
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-import { writeFileSync } from 'node:fs';
+const AUTH = `shop_domain=${encodeURIComponent(SHOP_DOMAIN || '')}&api_token=${encodeURIComponent(API_TOKEN || '')}`;
 
 function assertEnv() {
   const missing = [];
@@ -74,123 +44,117 @@ function assertEnv() {
   if (!API_TOKEN) missing.push('JUDGEME_API_TOKEN');
   if (missing.length) {
     console.error(`\n❌ Variable(s) d'environnement manquante(s) : ${missing.join(', ')}`);
-    console.error('   Exemple :');
-    console.error('   SHOP_DOMAIN="xxx.myshopify.com" JUDGEME_API_TOKEN="ton_token" node generate-judgeme-reviews.mjs\n');
-    process.exit(1);
-  }
-  if (PRODUCT_HANDLES.some(h => h.startsWith('remplace-moi'))) {
-    console.error('\n❌ Remplace d\'abord les handles produits factices dans PRODUCT_HANDLES (en haut du script).\n');
+    console.error('   Exemple : SHOP_DOMAIN="xxx.myshopify.com" JUDGEME_API_TOKEN="..." node generate-judgeme-reviews.mjs\n');
     process.exit(1);
   }
 }
 
 async function getJson(url) {
   const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} sur ${url.replace(API_TOKEN, '***')}`);
-  }
+  if (!res.ok) throw new Error(`HTTP ${res.status} sur ${url.replace(API_TOKEN, '***')}`);
   return res.json();
 }
 
-// 1) Handle Shopify -> ID interne Judge.me
-async function resolveInternalId(handle) {
-  const url = `${BASE}/products/-1?shop_domain=${encodeURIComponent(SHOP_DOMAIN)}`
-            + `&api_token=${encodeURIComponent(API_TOKEN)}`
-            + `&handle=${encodeURIComponent(handle)}`;
-  const data = await getJson(url);
-  const product = data.product || data;
-  if (!product || !product.id) {
-    throw new Error(`Aucun produit Judge.me trouvé pour le handle "${handle}"`);
+// 1) Pagination de TOUS les avis publiés de la boutique
+async function fetchAllReviews() {
+  let all = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const url = `${BASE}/reviews?${AUTH}&per_page=100&published=true&page=${page}`;
+    const data = await getJson(url);
+    const reviews = Array.isArray(data.reviews) ? data.reviews : [];
+    all = all.concat(reviews);
+    if (reviews.length < 100) break; // dernière page atteinte
   }
-  return { id: product.id, title: product.title || handle, handle };
+  return all;
 }
 
-// 2) Récupère tous les avis publiés d'un produit (jusqu'à 100)
-async function fetchReviews(productInternalId) {
-  const url = `${BASE}/reviews?shop_domain=${encodeURIComponent(SHOP_DOMAIN)}`
-            + `&api_token=${encodeURIComponent(API_TOKEN)}`
-            + `&product_id=${productInternalId}`
-            + `&per_page=100&published=true`;
-  const data = await getJson(url);
-  return Array.isArray(data.reviews) ? data.reviews : [];
+// 2) Résolution produit (handle + titre) pour le lien, avec cache
+const productCache = new Map();
+async function resolveProduct(review) {
+  // Si l'avis porte déjà l'info, on s'en sert directement
+  if (review.product_handle && review.product_title) {
+    return { handle: review.product_handle, title: review.product_title };
+  }
+  const ext = review.product_external_id;
+  const internal = review.product_id;
+  const key = ext ? ('e' + ext) : (internal ? ('i' + internal) : null);
+  if (!key) return { handle: null, title: null };
+  if (productCache.has(key)) return productCache.get(key);
+
+  let product = null;
+  try {
+    let url;
+    if (ext) url = `${BASE}/products/-1?${AUTH}&external_id=${encodeURIComponent(ext)}`;
+    else     url = `${BASE}/products/${encodeURIComponent(internal)}?${AUTH}`;
+    const d = await getJson(url);
+    product = d.product || d;
+  } catch (e) { /* on ignore : le lien sera simplement absent */ }
+
+  const res = (product && product.handle)
+    ? { handle: product.handle, title: product.title || product.handle }
+    : { handle: null, title: null };
+  productCache.set(key, res);
+  return res;
 }
 
-// Mise en forme d'un avis brut -> objet propre et minimal
-function cleanReview(raw, product) {
-  const reviewer =
-    (raw.reviewer && (raw.reviewer.name || raw.reviewer.email)) ||
-    raw.reviewer_name || 'Client vérifié';
-
-  const verified =
-    raw.verified === 'buyer' || raw.verified === true || raw.verified === 'verified';
-
-  return {
-    id: raw.id,
-    rating: Number(raw.rating) || 0,
-    title: (raw.title || '').trim(),
-    body: (raw.body || '').trim(),
-    reviewer: String(reviewer).trim(),
-    verified: Boolean(verified),
-    date: raw.created_at || raw.updated_at || null,
-    product_title: product.title,
-    product_handle: product.handle,
-    product_url: `/products/${product.handle}`,
-  };
+function reviewerName(r) {
+  return (r.reviewer && (r.reviewer.name || r.reviewer.email)) || r.reviewer_name || 'Client vérifié';
+}
+function isVerified(r) {
+  return r.verified === 'buyer' || r.verified === true || r.verified === 'verified';
 }
 
 async function main() {
   assertEnv();
-
   console.log(`\n→ Boutique : ${SHOP_DOMAIN}`);
-  console.log(`→ Produits : ${PRODUCT_HANDLES.length}`);
-  console.log(`→ Filtre   : notes >= ${MIN_RATING}, max ${LIMIT} avis, tri par ${SORT_BY}\n`);
+  console.log(`→ Mode     : TOUS les produits, notes >= ${MIN_RATING}, ${LIMIT} plus récents\n`);
 
-  let all = [];
+  const raw = await fetchAllReviews();
+  console.log(`  Avis récupérés (toute la boutique) : ${raw.length}`);
+  if (raw[0]) console.log(`  Champs d'un avis : ${Object.keys(raw[0]).join(', ')}`);
 
-  for (const handle of PRODUCT_HANDLES) {
-    try {
-      const product = await resolveInternalId(handle);
-      const raw = await fetchReviews(product.id);
-      const kept = raw
-        .map(r => cleanReview(r, product))
-        .filter(r => r.rating >= MIN_RATING && r.body.length > 0);
+  // Filtre note + tri par date décroissante
+  let kept = raw.filter(r => Number(r.rating) >= MIN_RATING);
+  kept.sort((a, b) => new Date(b.created_at || b.updated_at || 0) - new Date(a.created_at || a.updated_at || 0));
 
-      console.log(`  ✓ ${handle} : ${kept.length} avis ≥${MIN_RATING}★ (sur ${raw.length} récupérés)`);
-      all = all.concat(kept);
-    } catch (err) {
-      console.warn(`  ✗ ${handle} : ${err.message}`);
-    }
+  // Construction des 20 plus récents (avec résolution produit)
+  const out = [];
+  for (const r of kept) {
+    if (out.length >= LIMIT) break;
+
+    const p = await resolveProduct(r);
+
+    let body = (r.body || '').trim();
+    // Certains avis "note seule" ont pour corps le nom du produit : on le neutralise
+    if (p.title && body === p.title.trim()) body = '';
+    if (REQUIRE_TEXT && body.length === 0) continue;
+
+    out.push({
+      id: r.id,
+      rating: Number(r.rating) || 0,
+      title: (r.title || '').trim(),
+      body,
+      reviewer: String(reviewerName(r)).trim(),
+      verified: Boolean(isVerified(r)),
+      date: r.created_at || r.updated_at || null,
+      product_title: p.title || '',
+      product_handle: p.handle || '',
+      product_url: p.handle ? `/products/${p.handle}` : '',
+    });
   }
-
-  // Dédoublonnage par id d'avis (au cas où)
-  const seen = new Set();
-  all = all.filter(r => (seen.has(r.id) ? false : (seen.add(r.id), true)));
-
-  // Tri
-  if (SORT_BY === 'rating') {
-    all.sort((a, b) => (b.rating - a.rating) || (new Date(b.date) - new Date(a.date)));
-  } else {
-    all.sort((a, b) => new Date(b.date) - new Date(a.date));
-  }
-
-  // Limite
-  const final = all.slice(0, LIMIT);
 
   const payload = {
     generated_at: new Date().toISOString(),
-    count: final.length,
+    count: out.length,
     min_rating: MIN_RATING,
-    reviews: final,
+    reviews: out,
   };
 
   const json = JSON.stringify(payload, null, 2);
   writeFileSync(OUTPUT_FILE, json, 'utf8');
 
-  console.log(`\n✅ ${final.length} avis écrits dans "${OUTPUT_FILE}".`);
-  console.log('   Copie/colle le contenu ci-dessous dans le champ "Données des avis (JSON)" de la section :\n');
-  console.log('────────────────────────────────────────────────────────');
-  console.log(json);
-  console.log('────────────────────────────────────────────────────────\n');
+  console.log(`\n✅ ${out.length} avis écrits dans "${OUTPUT_FILE}".`);
+  if (out[0]) console.log(`   Plus récent : ${out[0].date} — ${out[0].reviewer} (${out[0].product_title || 'produit ?'})`);
 }
 
 main().catch(err => {
